@@ -20,9 +20,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val hosts = HostRepository(app)
     private val secrets = SecretStore(app)
 
-    var screen by mutableStateOf<Screen>(Screen.HostList)
-    var session by mutableStateOf<SessionController?>(null)
-        private set
+    /** The live session is owned by [SessionHolder] so it survives this ViewModel and the Activity. */
+    val session: SessionController? get() = SessionHolder.session
+
+    var screen by mutableStateOf<Screen>(if (SessionHolder.session != null) Screen.Session else Screen.HostList)
 
     fun credentialsFor(hostId: String) = secrets.credentials(hostId)
 
@@ -38,19 +39,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Opens a session. [credentials] may contain a password typed just now that isn't saved. */
     fun connect(host: Host, credentials: Credentials) {
-        session?.close()
         hosts.markConnected(host.id)
-        session = SessionController(getApplication(), host, credentials)
+        SessionHolder.start(getApplication(), host, credentials)
         screen = Screen.Session
     }
 
     fun disconnect() {
-        session?.close()
-        session = null
+        SessionHolder.stop(getApplication())
         screen = Screen.HostList
-    }
-
-    override fun onCleared() {
-        session?.close()
     }
 }

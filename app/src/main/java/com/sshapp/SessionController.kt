@@ -13,6 +13,7 @@ import com.sshapp.terminal.TerminalRenderer
 import com.sshapp.terminal.TerminalSnapshot
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -33,6 +34,8 @@ import java.io.OutputStream
 sealed interface ConnectionState {
     data object Connecting : ConnectionState
     data object Connected : ConnectionState
+    /** The network dropped; retrying in the background while the terminal stays visible. */
+    data object Reconnecting : ConnectionState
     data class Failed(val message: String) : ConnectionState
     data object Closed : ConnectionState
 }
@@ -94,6 +97,8 @@ class SessionController(
     /** True when the shell appears to be asking for a password; input is masked and not saved to history. */
     val passwordPrompt: StateFlow<Boolean> = _passwordPrompt.asStateFlow()
     private var shellOpen = false
+    private var everConnected = false
+    private var reconnectJob: Job? = null
 
     // endregion
 
@@ -113,36 +118,76 @@ class SessionController(
         scope.launch { renderLoop() }
     }
 
+    /** Manual connect/reconnect. Cancels any automatic retry in progress. */
     fun connect() {
-        _state.value = ConnectionState.Connecting
+        reconnectJob?.cancel()
+        reconnectJob = null
         scope.launch {
-            try {
-                connection.disconnect()
-                connection.connect()
-                withContext(Dispatchers.IO) {
-                    connection.openShell(
-                        emulator.cols, emulator.rows,
-                        onOutput = { buf, n -> synchronized(emulator) { emulator.feed(buf, n) } },
-                        onClosed = { scope.launch { onShellClosed() } },
-                    )
-                }
-                shellOpen = true
-                _state.value = ConnectionState.Connected
-                refreshInsights()
-                homeDir = runCatching { connection.home() }.getOrDefault("/")
-                if (_tree.value.root.isEmpty()) openFolder(homeDir)
-                else refreshTree()
-            } catch (e: Exception) {
-                connection.disconnect()
-                _state.value = ConnectionState.Failed(describe(e))
+            if (!tryConnect()) {
+                if (!everConnected) return@launch
+                _state.value = ConnectionState.Closed
             }
         }
     }
 
-    private fun onShellClosed() {
+    /** Returns true on success. On failure before the first successful connect, state becomes [ConnectionState.Failed]. */
+    private suspend fun tryConnect(): Boolean {
+        _state.value = if (everConnected) ConnectionState.Reconnecting else ConnectionState.Connecting
+        try {
+            connection.disconnect()
+            connection.connect()
+            withContext(Dispatchers.IO) {
+                connection.openShell(
+                    emulator.cols, emulator.rows,
+                    onOutput = { buf, n -> synchronized(emulator) { emulator.feed(buf, n) } },
+                    onClosed = { scope.launch { onShellClosed() } },
+                )
+            }
+            shellOpen = true
+            if (everConnected) note("reconnected")
+            everConnected = true
+            _state.value = ConnectionState.Connected
+            refreshInsights()
+            homeDir = runCatching { connection.home() }.getOrDefault("/")
+            if (_tree.value.root.isEmpty()) openFolder(homeDir)
+            else refreshTree()
+            return true
+        } catch (e: Exception) {
+            connection.disconnect()
+            lastError = describe(e)
+            if (!everConnected) _state.value = ConnectionState.Failed(lastError!!)
+            return false
+        }
+    }
+
+    private var lastError: String? = null
+
+    private suspend fun onShellClosed() {
         shellOpen = false
-        if (_state.value == ConnectionState.Connected) _state.value = ConnectionState.Closed
+        if (_state.value != ConnectionState.Connected) return
+        // If the SSH session itself is still up, the user ended the shell (`exit`): don't reconnect.
+        // If the session is gone too, the network dropped: reconnect automatically.
+        delay(300)
+        val networkDrop = !connection.isConnected
         connection.disconnect()
+        if (!networkDrop) {
+            _state.value = ConnectionState.Closed
+            return
+        }
+        note("connection lost")
+        reconnectJob = scope.launch {
+            for ((attempt, wait) in RETRY_DELAYS_MS.withIndex()) {
+                if (tryConnect()) return@launch
+                _messages.tryEmit("Reconnect attempt ${attempt + 1} failed: $lastError")
+                delay(wait)
+            }
+            if (!tryConnect()) _state.value = ConnectionState.Closed
+        }
+    }
+
+    /** Writes a dim status line into the terminal, e.g. "[connection lost]". */
+    private fun note(text: String) = synchronized(emulator) {
+        emulator.feed("\r\n\u001b[2;33m[$text]\u001b[0m\r\n")
     }
 
     /** Coalesces emulator updates into at most ~30 snapshots per second. */
@@ -327,12 +372,14 @@ class SessionController(
     fun emitMessage(text: String) { _messages.tryEmit(text) }
 
     fun close() {
+        reconnectJob?.cancel()
         scope.cancel()
         Thread { connection.disconnect() }.start()
     }
 
     companion object {
         const val MAX_PREVIEW_BYTES = 512 * 1024
+        private val RETRY_DELAYS_MS = listOf(1_000L, 2_000L, 4_000L, 8_000L, 15_000L, 30_000L)
         private val PASSWORD_PROMPT = Regex("(password|passphrase)[^:\n]*:\\s*$", RegexOption.IGNORE_CASE)
 
         fun describe(e: Throwable): String {

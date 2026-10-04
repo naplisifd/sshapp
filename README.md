@@ -15,6 +15,8 @@ Android SSH client aimed at managing Ubuntu servers. Kotlin + Jetpack Compose, S
   reboot required, failed services, disk >80%, low memory, high load, big journal, docker/ufw),
   your most-used commands on that host (ranked by frequency + recency), and a searchable catalog
   of common Ubuntu admin commands. Commands with `<placeholders>` open in the input box to fill in.
+- **Background** – a foreground service ("Connected" notification with Disconnect) keeps the session
+  alive when you switch apps; dropped connections reconnect automatically with backoff.
 - **Hosts** – password or private key (OpenSSH/PEM, paste or import). Secrets are encrypted with an
   Android Keystore AES-GCM key. Trust-on-first-use host key verification with a warning on change.
 

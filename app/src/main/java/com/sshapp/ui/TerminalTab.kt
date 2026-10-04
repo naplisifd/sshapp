@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.KeyboardDoubleArrowDown
 import androidx.compose.material.icons.automirrored.filled.ShortText
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -95,6 +96,7 @@ fun TerminalTab(
     pendingInput: String?,
     onPendingConsumed: () -> Unit,
     disconnected: Boolean,
+    reconnecting: Boolean,
     onReconnect: () -> Unit,
 ) {
     val snapshot by session.terminal.collectAsState()
@@ -199,6 +201,15 @@ fun TerminalTab(
             }
         }
 
+        if (reconnecting) {
+            Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Text("  Connection lost, reconnecting…", Modifier.weight(1f), color = MaterialTheme.colorScheme.onSecondaryContainer)
+                    TextButton(onClick = onReconnect) { Text("Retry now") }
+                }
+            }
+        }
         if (disconnected) {
             Surface(color = MaterialTheme.colorScheme.errorContainer) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {

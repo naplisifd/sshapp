@@ -64,6 +64,7 @@ enum class SessionTab(val title: String) { TERMINAL("Terminal"), FILES("Files"),
 fun ConnectionState.label() = when (this) {
     ConnectionState.Connecting -> "Connecting…"
     ConnectionState.Connected -> "Connected"
+    ConnectionState.Reconnecting -> "Reconnecting…"
     ConnectionState.Closed -> "Disconnected"
     is ConnectionState.Failed -> "Failed"
 }
@@ -112,7 +113,7 @@ fun SessionScreen(session: SessionController, onBackToHosts: () -> Unit, onDisco
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                             DropdownMenuItem(text = { Text("Larger text") }, onClick = { fontSize = (fontSize + 1).coerceAtMost(24f) })
                             DropdownMenuItem(text = { Text("Smaller text") }, onClick = { fontSize = (fontSize - 1).coerceAtLeast(7f) })
-                            if (state !is ConnectionState.Connecting && state != ConnectionState.Connected) {
+                            if (state == ConnectionState.Closed || state is ConnectionState.Failed) {
                                 DropdownMenuItem(text = { Text("Reconnect") }, onClick = { menu = false; session.connect() })
                             }
                             DropdownMenuItem(text = { Text("Disconnect") }, onClick = { menu = false; onDisconnect() })
@@ -147,12 +148,13 @@ fun SessionScreen(session: SessionController, onBackToHosts: () -> Unit, onDisco
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
             when (state) {
-                ConnectionState.Connected, ConnectionState.Closed -> when (tab) {
+                ConnectionState.Connected, ConnectionState.Closed, ConnectionState.Reconnecting -> when (tab) {
                     SessionTab.TERMINAL -> TerminalTab(
                         session, fontSize,
                         pendingInput = pendingInput,
                         onPendingConsumed = { pendingInput = null },
                         disconnected = state == ConnectionState.Closed,
+                        reconnecting = state == ConnectionState.Reconnecting,
                         onReconnect = session::connect,
                     )
                     SessionTab.FILES -> FilesTab(session, onRunInTerminal = runInTerminal)

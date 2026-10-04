@@ -1,6 +1,10 @@
 package com.sshapp
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -18,6 +22,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // The "connected" notification keeps the session alive in the background; ask to show it.
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+                .launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
         setContent {
             AppTheme {
                 when (val s = vm.screen) {
@@ -27,7 +38,7 @@ class MainActivity : ComponentActivity() {
                         HostEditScreen(vm, s.hostId)
                     }
                     Screen.Session -> {
-                        val session = vm.session
+                        val session = SessionHolder.session
                         if (session == null) LaunchedEffect(Unit) { vm.screen = Screen.HostList }
                         else SessionScreen(session, onBackToHosts = { vm.screen = Screen.HostList }, onDisconnect = vm::disconnect)
                     }
