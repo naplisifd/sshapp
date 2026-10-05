@@ -285,7 +285,7 @@ fun TerminalTab(
                     else -> false
                 }
             }
-            if (rawMode) {
+            if (rawMode) NoAutocorrect {
                 TextField(
                     value = raw,
                     onValueChange = { v ->
@@ -310,8 +310,7 @@ fun TerminalTab(
                     keyboardActions = KeyboardActions(onSend = { send(TerminalKeys.ENTER) }),
                     modifier = Modifier.weight(1f).focusRequester(focus).then(hardwareKeys),
                 )
-                IconButton(onClick = { send(TerminalKeys.ENTER) }) { Icon(Icons.AutoMirrored.Filled.Send, "Enter") }
-            } else {
+            } else NoAutocorrect(hidden = passwordPrompt) {
                 TextField(
                     value = line,
                     onValueChange = { v ->
@@ -332,6 +331,10 @@ fun TerminalTab(
                     keyboardActions = KeyboardActions(onSend = { submitLine() }),
                     modifier = Modifier.weight(1f).focusRequester(focus).then(hardwareKeys),
                 )
+            }
+            if (rawMode) {
+                IconButton(onClick = { send(TerminalKeys.ENTER) }) { Icon(Icons.AutoMirrored.Filled.Send, "Enter") }
+            } else {
                 IconButton(onClick = ::submitLine) {
                     Icon(Icons.AutoMirrored.Filled.Send, "Run", tint = MaterialTheme.colorScheme.primary)
                 }

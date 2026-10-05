@@ -74,7 +74,7 @@ fun CommandsTab(session: SessionController, onRun: (String) -> Unit, onEdit: (St
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        item {
+        item { NoAutocorrect {
             OutlinedTextField(
                 query, { query = it },
                 placeholder = { Text("Search commands, e.g. \"disk\" or \"restart\"") },
@@ -83,7 +83,7 @@ fun CommandsTab(session: SessionController, onRun: (String) -> Unit, onEdit: (St
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-        }
+        } }
 
         if (query.isNotBlank()) {
             val results = Suggester.suggest(query, historyEntries, 40)
