@@ -13,11 +13,31 @@ class TerminalEmulator(
     /** Bytes the terminal must send back to the host (device status reports etc). */
     private val reply: (String) -> Unit,
 ) {
-    class Line(cols: Int) {
-        var chars = CharArray(cols) { ' ' }
-        var attrs = IntArray(cols) { DEFAULT_ATTR }
+    /**
+     * One row of text. Rows on screen are modified in place; once a row scrolls into [scrollback] it is
+     * never modified again, which lets snapshots share scrollback rows with the UI without copying.
+     */
+    class Line(
+        cols: Int,
+        /** Stable identity for UI list keys; kept as the row scrolls into scrollback and by [frozenCopy]. */
+        val id: Long,
+    ) {
+        var chars = CharArray(cols).also { java.util.Arrays.fill(it, ' ') }
+        var attrs = IntArray(cols).also { java.util.Arrays.fill(it, DEFAULT_ATTR) }
         /** Bumped on every modification so renderers can cache. */
         var version = 0L
+
+        /** Immutable copy for the UI, valid while [frozenVersion] == [version]. Only touched under the emulator lock. */
+        @JvmField internal var frozen: Line? = null
+        @JvmField internal var frozenVersion = -1L
+        /** Styled text cache for the renderer. Only touched on the UI thread, and only on rows that no longer change. */
+        @JvmField internal var uiText: Any? = null
+
+        internal fun frozenCopy(): Line = Line(0, id).also {
+            it.chars = chars.copyOf()
+            it.attrs = attrs.copyOf()
+            it.version = version
+        }
 
         fun resize(cols: Int) {
             if (cols == chars.size) return
@@ -41,8 +61,11 @@ class TerminalEmulator(
     var cols = cols; private set
     var rows = rows; private set
 
-    private var main = MutableList(rows) { Line(cols) }
-    private var alt = MutableList(rows) { Line(cols) }
+    private var nextLineId = 0L
+    private fun newLine(cols: Int) = Line(cols, nextLineId++)
+
+    private var main = MutableList(rows) { newLine(cols) }
+    private var alt = MutableList(rows) { newLine(cols) }
     val scrollback = ArrayDeque<Line>()
     var usingAlt = false; private set
     val screen: List<Line> get() = if (usingAlt) alt else main
@@ -342,9 +365,11 @@ class TerminalEmulator(
         val buf = if (usingAlt) alt else main
         val removed = buf.removeAt(top)
         if (!usingAlt && top == 0) {
-            scrollback.addLast(removed)
+            // Reuse the renderer's up-to-date copy if it has one, so the UI keeps its cached styled text.
+            scrollback.addLast(removed.frozen?.takeIf { removed.frozenVersion == removed.version } ?: removed.also { it.frozen = null })
             while (scrollback.size > MAX_SCROLLBACK) scrollback.removeFirst()
-            buf.add(bottom, Line(cols).also { it.clear(0, cols, blankAttr()) })
+            val blank = blankAttr()
+            buf.add(bottom, newLine(cols).also { if (blank != DEFAULT_ATTR) it.clear(0, cols, blank) })
         } else {
             removed.clear(0, cols, blankAttr())
             buf.add(bottom, removed)
@@ -410,7 +435,7 @@ class TerminalEmulator(
                 if (!usingAlt) {
                     val lastUsed = s.indexOfLast { it.text().isNotEmpty() }
                     for (y in 0..lastUsed) {
-                        scrollback.addLast(Line(cols).also { l ->
+                        scrollback.addLast(newLine(cols).also { l ->
                             s[y].chars.copyInto(l.chars); s[y].attrs.copyInto(l.attrs)
                         })
                     }
@@ -464,7 +489,7 @@ class TerminalEmulator(
         for (buf in listOf(main, alt)) {
             buf.forEach { it.resize(newCols) }
         }
-        scrollback.forEach { it.resize(newCols) }
+        // Scrollback rows keep their original width: they must stay immutable, and narrowing them would lose text.
         // Shrinking: move lines off the top (into scrollback) so the cursor stays visible.
         while (main.size > newRows) {
             if (cursorY > 0 && main.size - 1 >= cursorY + 1 && main.last().text().isEmpty()) {
@@ -474,9 +499,9 @@ class TerminalEmulator(
                 if (!usingAlt) cursorY = (cursorY - 1).coerceAtLeast(0)
             }
         }
-        while (main.size < newRows) main.add(Line(newCols))
+        while (main.size < newRows) main.add(newLine(newCols))
         while (alt.size > newRows) alt.removeAt(alt.size - 1)
-        while (alt.size < newRows) alt.add(Line(newCols))
+        while (alt.size < newRows) alt.add(newLine(newCols))
         cols = newCols
         rows = newRows
         tabStops = BooleanArray(cols) { it % 8 == 0 }

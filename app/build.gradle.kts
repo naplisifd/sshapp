@@ -12,8 +12,8 @@ android {
         applicationId = "com.sshapp"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.3"
+        versionCode = 5
+        versionName = "1.4"
     }
 
     buildTypes {
@@ -21,6 +21,8 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Same key as the earlier debug-build releases, so this installs over them and keeps saved servers.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {

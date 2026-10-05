@@ -15,16 +15,22 @@ import com.sshapp.terminal.TerminalEmulator.Companion.ITALIC
 import com.sshapp.terminal.TerminalEmulator.Companion.STRIKE
 import com.sshapp.terminal.TerminalEmulator.Companion.UNDERLINE
 
-/** An immutable copy of what the terminal should display, safe to hand to Compose. */
+/**
+ * What the terminal should display, safe to hand to Compose: every line in it is immutable (scrollback
+ * rows never change, screen rows are copies). Styled text is built lazily, only for rows on screen.
+ */
 data class TerminalSnapshot(
-    val lines: List<AnnotatedString>,
+    val lines: List<TerminalEmulator.Line>,
     /** Index into [lines] of the first visible screen row; everything before it is scrollback. */
     val screenStart: Int,
+    /** Index into [lines] of the row holding the cursor, or -1 when the cursor is hidden. */
+    val cursorIndex: Int,
+    val cursorX: Int,
     val version: Long,
     val usingAlt: Boolean,
 ) {
     companion object {
-        val EMPTY = TerminalSnapshot(emptyList(), 0, -1, false)
+        val EMPTY = TerminalSnapshot(emptyList(), 0, -1, 0, -1, false)
     }
 }
 
@@ -49,28 +55,30 @@ object TerminalColors {
     fun bg(index: Int) = if (index == DEFAULT_COLOR) Color.Unspecified else palette[index]
 }
 
-/** Converts emulator lines to styled strings, caching by line identity + version. */
-class TerminalRenderer {
-    private class Cached(val version: Long, val cursorX: Int, val text: AnnotatedString)
-    private val cache = java.util.WeakHashMap<TerminalEmulator.Line, Cached>()
-
-    /** Must be called while holding the emulator's lock. */
+/** Snapshots the emulator and converts its lines to styled strings. */
+object TerminalRenderer {
+    /**
+     * Must be called while holding the emulator's lock. Cheap even with a full scrollback: scrollback rows
+     * are shared as-is and only screen rows that changed since the last snapshot are copied.
+     */
     fun snapshot(term: TerminalEmulator): TerminalSnapshot {
-        val out = ArrayList<AnnotatedString>(term.scrollback.size + term.rows)
-        if (!term.usingAlt) term.scrollback.forEach { out += render(it, -1) }
+        val screen = term.screen
+        val out = ArrayList<TerminalEmulator.Line>((if (term.usingAlt) 0 else term.scrollback.size) + screen.size)
+        if (!term.usingAlt) out.addAll(term.scrollback)
         val start = out.size
-        term.screen.forEachIndexed { y, line ->
-            val cx = if (term.cursorVisible && y == term.cursorY) term.cursorX else -1
-            out += render(line, cx)
+        for (line in screen) {
+            out += line.frozen?.takeIf { line.frozenVersion == line.version }
+                ?: line.frozenCopy().also { line.frozen = it; line.frozenVersion = line.version }
         }
-        return TerminalSnapshot(out, start, term.version, term.usingAlt)
+        val cursorIndex = if (term.cursorVisible) start + term.cursorY else -1
+        return TerminalSnapshot(out, start, cursorIndex, term.cursorX, term.version, term.usingAlt)
     }
 
-    private fun render(line: TerminalEmulator.Line, cursorX: Int): AnnotatedString {
-        cache[line]?.let { if (it.version == line.version && it.cursorX == cursorX) return it.text }
-        val text = build(line, cursorX)
-        cache[line] = Cached(line.version, cursorX, text)
-        return text
+    /** Styled text for a snapshot line. UI thread only; cached on the line except for the cursor row. */
+    fun text(line: TerminalEmulator.Line, cursorX: Int): AnnotatedString {
+        if (cursorX >= 0) return build(line, cursorX)
+        (line.uiText as? AnnotatedString)?.let { return it }
+        return build(line, -1).also { line.uiText = it }
     }
 
     private fun build(line: TerminalEmulator.Line, cursorX: Int): AnnotatedString {

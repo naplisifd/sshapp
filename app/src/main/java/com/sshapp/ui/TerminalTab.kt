@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -43,8 +44,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -78,13 +83,16 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.unit.sp
 import com.sshapp.SessionController
 import com.sshapp.data.CatalogCommand
 import com.sshapp.data.Suggester
 import com.sshapp.terminal.TerminalColors
 import com.sshapp.terminal.TerminalKeys
+import com.sshapp.terminal.TerminalRenderer
 import kotlinx.coroutines.launch
 
 private const val SENTINEL = "​​"
@@ -99,10 +107,11 @@ fun TerminalTab(
     reconnecting: Boolean,
     onReconnect: () -> Unit,
 ) {
-    val snapshot by session.terminal.collectAsState()
-    val appCursor by session.appCursorKeys.collectAsState()
-    val passwordPrompt by session.passwordPrompt.collectAsState()
-    val historyEntries by session.history.entries.collectAsState()
+    // Lifecycle-aware so the session stops rendering while the app is in the background.
+    val usingAlt by session.usingAlt.collectAsStateWithLifecycle()
+    val appCursor by session.appCursorKeys.collectAsStateWithLifecycle()
+    val passwordPrompt by session.passwordPrompt.collectAsStateWithLifecycle()
+    val historyEntries by session.history.entries.collectAsStateWithLifecycle()
 
     var rawMode by rememberSaveable { mutableStateOf(false) }
     var ctrlArmed by remember { mutableStateOf(false) }
@@ -110,10 +119,23 @@ fun TerminalTab(
     var raw by remember { mutableStateOf(TextFieldValue(SENTINEL, TextRange(SENTINEL.length))) }
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    val ime = WindowInsets.ime
+    val density = LocalDensity.current
+    // A focused input keeps its cursor blinking, redrawing the screen twice a second. Drop focus when the
+    // keyboard is dismissed so an idle terminal draws nothing. Only on a shown→hidden change, so hardware
+    // keyboards (where the soft keyboard never appears) keep their focus.
+    LaunchedEffect(Unit) {
+        var wasVisible = false
+        snapshotFlow { ime.getBottom(density) > 0 }.collect { visible ->
+            if (wasVisible && !visible) focusManager.clearFocus()
+            wasVisible = visible
+        }
+    }
     val scope = rememberCoroutineScope()
 
     // Full-screen apps (nano, htop, less, vim) need keystrokes, not lines.
-    LaunchedEffect(snapshot.usingAlt) { rawMode = snapshot.usingAlt }
+    LaunchedEffect(usingAlt) { rawMode = usingAlt }
 
     LaunchedEffect(pendingInput) {
         val cmd = pendingInput ?: return@LaunchedEffect
@@ -161,7 +183,6 @@ fun TerminalTab(
                 TextStyle(fontFamily = FontFamily.Monospace, fontSize = fontSize.sp, lineHeight = (fontSize * 1.2f).sp, color = TerminalColors.foreground)
             }
             val cell = remember(style) { measurer.measure("W".repeat(20), style, softWrap = false) }
-            val density = LocalDensity.current
             val charW = cell.size.width / 20f
             val lineH = cell.size.height
             val cols = (constraints.maxWidth / charW).toInt().coerceAtLeast(20)
@@ -173,25 +194,8 @@ fun TerminalTab(
             }
 
             val listState = rememberLazyListState()
-            val lines = snapshot.lines
             val lineHeightDp = with(density) { lineH.toDp() }
-            // reverseLayout keeps the newest output pinned to the bottom unless the user scrolls back.
-            LazyColumn(
-                state = listState,
-                reverseLayout = true,
-                modifier = Modifier.fillMaxSize(),
-                userScrollEnabled = !snapshot.usingAlt,
-            ) {
-                items(lines.size) { i ->
-                    Text(
-                        lines[lines.size - 1 - i],
-                        style = style,
-                        softWrap = false,
-                        maxLines = 1,
-                        modifier = Modifier.height(lineHeightDp),
-                    )
-                }
-            }
+            TerminalLines(session, listState, style, lineHeightDp, scrollable = !usingAlt)
             val scrolledBack by remember { derivedStateOf { listState.firstVisibleItemIndex > 2 } }
             if (scrolledBack) {
                 SmallFloatingActionButton(
@@ -339,6 +343,40 @@ fun TerminalTab(
                     Icon(Icons.AutoMirrored.Filled.Send, "Run", tint = MaterialTheme.colorScheme.primary)
                 }
             }
+        }
+    }
+}
+
+/**
+ * The terminal output. Kept in its own composable so a new frame only recomposes this list, and keyed
+ * by line identity so rows that merely moved (scrolling) keep their layout instead of being re-measured.
+ */
+@Composable
+private fun TerminalLines(session: SessionController, listState: LazyListState, style: TextStyle, lineHeight: Dp, scrollable: Boolean) {
+    val snapshot by session.terminal.collectAsStateWithLifecycle()
+    val lines = snapshot.lines
+    // Keys make the list hold its position by line identity, so new output would push the view up. While the
+    // user is at the newest output, keep following it; once they've scrolled back, leave them where they are.
+    val following = Snapshot.withoutReadObservation { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0 }
+    if (following) listState.requestScrollToItem(0)
+    // reverseLayout keeps the newest output pinned to the bottom unless the user scrolls back.
+    LazyColumn(
+        state = listState,
+        reverseLayout = true,
+        modifier = Modifier.fillMaxSize(),
+        userScrollEnabled = scrollable,
+    ) {
+        items(lines.size, key = { i -> lines[lines.size - 1 - i].id }) { i ->
+            val index = lines.size - 1 - i
+            val line = lines[index]
+            val cursorX = if (index == snapshot.cursorIndex) snapshot.cursorX else -1
+            Text(
+                remember(line, cursorX) { TerminalRenderer.text(line, cursorX) },
+                style = style,
+                softWrap = false,
+                maxLines = 1,
+                modifier = Modifier.height(lineHeight),
+            )
         }
     }
 }

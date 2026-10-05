@@ -17,6 +17,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,6 +25,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -95,11 +97,15 @@ class SessionController(
     // region terminal
 
     private val emulator = TerminalEmulator(80, 24) { reply -> sendRaw(reply) }
-    private val renderer = TerminalRenderer()
     private val _terminal = MutableStateFlow(TerminalSnapshot.EMPTY)
     val terminal: StateFlow<TerminalSnapshot> = _terminal.asStateFlow()
+    /** Signalled whenever the emulator changes; conflated, so a burst of output wakes the renderer once. */
+    private val dirty = Channel<Unit>(Channel.CONFLATED)
     private val _appCursorKeys = MutableStateFlow(false)
     val appCursorKeys: StateFlow<Boolean> = _appCursorKeys.asStateFlow()
+    private val _usingAlt = MutableStateFlow(false)
+    /** True while a full-screen app (nano, htop, less) is using the alternate screen. */
+    val usingAlt: StateFlow<Boolean> = _usingAlt.asStateFlow()
     private val _passwordPrompt = MutableStateFlow(false)
     /** True when the shell appears to be asking for a password; input is masked and not saved to history. */
     val passwordPrompt: StateFlow<Boolean> = _passwordPrompt.asStateFlow()
@@ -146,7 +152,10 @@ class SessionController(
             withContext(Dispatchers.IO) {
                 connection.openShell(
                     emulator.cols, emulator.rows,
-                    onOutput = { buf, n -> synchronized(emulator) { emulator.feed(buf, n) } },
+                    onOutput = { buf, n ->
+                        synchronized(emulator) { emulator.feed(buf, n) }
+                        dirty.trySend(Unit)
+                    },
                     onClosed = { scope.launch { onShellClosed() } },
                 )
             }
@@ -193,27 +202,41 @@ class SessionController(
     }
 
     /** Writes a dim status line into the terminal, e.g. "[connection lost]". */
-    private fun note(text: String) = synchronized(emulator) {
-        emulator.feed("\r\n\u001b[2;33m[$text]\u001b[0m\r\n")
+    private fun note(text: String) {
+        synchronized(emulator) { emulator.feed("\r\n\u001b[2;33m[$text]\u001b[0m\r\n") }
+        dirty.trySend(Unit)
     }
 
-    /** Coalesces emulator updates into at most ~30 snapshots per second. */
+    /**
+     * Turns emulator changes into snapshots for the UI, at most ~30 per second. Sleeps while there is
+     * no new output, and skips rendering entirely while nothing is showing the terminal (app in the
+     * background, another session or tab on screen); it catches up as soon as the terminal is shown.
+     */
     private suspend fun renderLoop() {
         var lastVersion = -1L
+        var pending = false
+        var busyFrames = 0
         while (true) {
+            if (!pending) dirty.receive()
+            _terminal.subscriptionCount.first { it > 0 }
             val snap = withContext(Dispatchers.Default) {
                 synchronized(emulator) {
                     if (emulator.version == lastVersion) null
                     else {
                         lastVersion = emulator.version
                         _appCursorKeys.value = emulator.appCursorKeys
+                        _usingAlt.value = emulator.usingAlt
                         _passwordPrompt.value = PASSWORD_PROMPT.containsMatchIn(emulator.cursorLineText())
-                        renderer.snapshot(emulator)
+                        TerminalRenderer.snapshot(emulator)
                     }
                 }
             }
             if (snap != null) _terminal.value = snap
-            delay(33)
+            // During a sustained flood of output (`cat` of a big file, noisy logs) halve the frame rate:
+            // drawing is the most expensive part and nobody can read that fast anyway.
+            delay(if (busyFrames >= FLOOD_FRAMES) FLOOD_FRAME_MS else FRAME_MS)
+            pending = dirty.tryReceive().isSuccess
+            busyFrames = if (pending) busyFrames + 1 else 0
         }
     }
 
@@ -222,6 +245,7 @@ class SessionController(
             if (cols == emulator.cols && rows == emulator.rows) false
             else { emulator.resize(cols, rows); true }
         }
+        if (changed) dirty.trySend(Unit)
         if (changed && shellOpen) scope.launch(Dispatchers.IO) { connection.resize(cols, rows) }
     }
 
@@ -233,8 +257,10 @@ class SessionController(
 
     /** Sends a full command line from the input box, recording it for suggestions. */
     fun sendCommand(command: String) {
-        val secret = _passwordPrompt.value
-        val inApp = synchronized(emulator) { emulator.usingAlt }
+        // Read the emulator directly: the rendered flags are stale while the terminal isn't on screen.
+        val (secret, inApp) = synchronized(emulator) {
+            PASSWORD_PROMPT.containsMatchIn(emulator.cursorLineText()) to emulator.usingAlt
+        }
         if (!secret && !inApp && command.isNotBlank()) history.record(command)
         sendRaw(command + "\r")
     }
@@ -386,6 +412,10 @@ class SessionController(
 
     companion object {
         const val MAX_PREVIEW_BYTES = 512 * 1024
+        private const val FRAME_MS = 33L
+        private const val FLOOD_FRAME_MS = 66L
+        /** Consecutive frames with new output (~1 s) before treating it as a flood. */
+        private const val FLOOD_FRAMES = 30
         private val RETRY_DELAYS_MS = listOf(1_000L, 2_000L, 4_000L, 8_000L, 15_000L, 30_000L)
         private val PASSWORD_PROMPT = Regex("(password|passphrase)[^:\n]*:\\s*$", RegexOption.IGNORE_CASE)
 

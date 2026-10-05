@@ -25,11 +25,15 @@ Android SSH client aimed at managing Ubuntu servers. Kotlin + Jetpack Compose, S
 ## Build
 
 ```sh
-./gradlew assembleDebug        # app/build/outputs/apk/debug/app-debug.apk
-./gradlew assembleRelease      # unsigned, minified
+./gradlew assembleRelease      # app/build/outputs/apk/release/app-release.apk — minified, use this one
+./gradlew assembleDebug        # app/build/outputs/apk/debug/app-debug.apk — for development
 ```
 
 Requires JDK 17 and Android SDK 36 (`local.properties` → `sdk.dir`). minSdk 26.
+
+The release build is signed with the local debug keystore (`~/.android/debug.keystore`), the same key
+as the v1.0–v1.3 APKs, so it installs over them. It is ~4 MB instead of ~21 MB and uses roughly half
+the CPU and a third of the memory of the debug build.
 
 ## Code map
 
