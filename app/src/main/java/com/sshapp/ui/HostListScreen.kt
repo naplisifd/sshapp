@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.MoreVert
@@ -54,6 +55,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.sshapp.AppViewModel
 import com.sshapp.Screen
+import com.sshapp.SessionController
 import com.sshapp.data.AuthType
 import com.sshapp.data.Credentials
 import com.sshapp.data.Host
@@ -66,7 +68,6 @@ fun HostListScreen(vm: AppViewModel) {
     val hosts by vm.hosts.hosts.collectAsState()
     var askPasswordFor by remember { mutableStateOf<Host?>(null) }
     var confirmDelete by remember { mutableStateOf<Host?>(null) }
-    val active = vm.session
 
     fun connect(host: Host) {
         val creds = vm.credentialsFor(host.id)
@@ -89,22 +90,24 @@ fun HostListScreen(vm: AppViewModel) {
             contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 96.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            if (active != null) item {
-                val state by active.state.collectAsState()
-                Card(
-                    onClick = { vm.screen = Screen.Session },
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-                ) {
-                    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Terminal, null)
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text("Active session", fontWeight = FontWeight.SemiBold)
-                            Text("${active.host.label} · ${state.label()}", style = MaterialTheme.typography.bodySmall)
-                        }
-                        TextButton(onClick = { vm.screen = Screen.Session }) { Text("Resume") }
-                    }
-                }
+            if (vm.sessions.isNotEmpty()) item {
+                Text(
+                    if (vm.sessions.size == 1) "Open session" else "Open sessions (${vm.sessions.size})",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, top = 4.dp),
+                )
+            }
+            items(vm.sessions, key = { "session:" + it.id }) { session ->
+                ActiveSessionCard(session, onResume = { vm.open(session) }, onClose = { vm.disconnect(session); vm.screen = Screen.HostList })
+            }
+            if (vm.sessions.isNotEmpty() && hosts.isNotEmpty()) item {
+                Text(
+                    "Servers · tap to open a new session",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, top = 8.dp),
+                )
             }
             if (hosts.isEmpty()) item {
                 Column(
@@ -156,6 +159,23 @@ fun HostListScreen(vm: AppViewModel) {
             confirmButton = { TextButton(onClick = { vm.deleteHost(host); confirmDelete = null }) { Text("Delete") } },
             dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel") } },
         )
+    }
+}
+
+@Composable
+private fun ActiveSessionCard(session: SessionController, onResume: () -> Unit, onClose: () -> Unit) {
+    val state by session.state.collectAsState()
+    Card(onClick = onResume, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+        Row(Modifier.fillMaxWidth().padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Terminal, null)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(session.title, fontWeight = FontWeight.SemiBold)
+                Text("${session.host.username}@${session.host.hostname} · ${state.label()}", style = MaterialTheme.typography.bodySmall)
+            }
+            TextButton(onClick = onResume) { Text("Resume") }
+            IconButton(onClick = onClose) { Icon(Icons.Default.Close, "Disconnect") }
+        }
     }
 }
 

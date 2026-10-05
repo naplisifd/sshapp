@@ -56,17 +56,24 @@ data class TreeRow(val file: RemoteFile, val depth: Int, val expanded: Boolean, 
 
 /**
  * Everything belonging to one live SSH session: connection, terminal emulator, command history,
- * server insights and the SFTP tree. Lives in [AppViewModel] so it survives configuration changes.
+ * server insights and the SFTP tree. Owned by [SessionHolder]; several can be open at once, including
+ * more than one to the same host.
  */
 class SessionController(
     context: Context,
     val host: Host,
-    credentials: Credentials,
+    /** Kept so "new session" on this server can reuse a password that was typed but not saved. */
+    val credentials: Credentials,
+    /** 1 for the first open session to [host], 2 for the second, and so on. */
+    val number: Int = 1,
 ) {
+    val id: String = java.util.UUID.randomUUID().toString()
+    val title: String get() = if (number > 1) "${host.label} ($number)" else host.label
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val appContext = context.applicationContext
 
-    val history = CommandHistory(appContext, host.id)
+    val history = CommandHistory.forHost(appContext, host.id)
 
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Connecting)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()

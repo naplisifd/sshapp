@@ -56,6 +56,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.Tab
+import com.sshapp.AppViewModel
+import com.sshapp.Screen
 import com.sshapp.ConnectionState
 import com.sshapp.SessionController
 
@@ -71,12 +79,15 @@ fun ConnectionState.label() = when (this) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SessionScreen(session: SessionController, onBackToHosts: () -> Unit, onDisconnect: () -> Unit) {
+fun SessionScreen(vm: AppViewModel, session: SessionController) {
+    val onBackToHosts = { vm.screen = Screen.HostList }
+    val onDisconnect = { vm.disconnect(session) }
     val state by session.state.collectAsState()
     val hostKey by session.hostKeyQuestion.collectAsState()
     var tab by rememberSaveable { mutableStateOf(SessionTab.TERMINAL) }
     var fontSize by rememberSaveable { mutableFloatStateOf(13f) }
     var menu by remember { mutableStateOf(false) }
+    var addMenu by remember { mutableStateOf(false) }
     var pendingInput by remember { mutableStateOf<String?>(null) }
     val snackbar = remember { SnackbarHostState() }
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
@@ -94,11 +105,11 @@ fun SessionScreen(session: SessionController, onBackToHosts: () -> Unit, onDisco
     }
 
     Scaffold(
-        topBar = {
+        topBar = { Column {
             TopAppBar(
                 title = {
                     Column {
-                        Text(session.host.label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(
                             state.label(),
                             style = MaterialTheme.typography.labelSmall,
@@ -108,6 +119,16 @@ fun SessionScreen(session: SessionController, onBackToHosts: () -> Unit, onDisco
                 },
                 navigationIcon = { IconButton(onClick = onBackToHosts) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Servers") } },
                 actions = {
+                    Box {
+                        IconButton(onClick = { addMenu = true }) { Icon(Icons.Default.Add, "New session") }
+                        DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("New session on ${session.host.label}") },
+                                onClick = { addMenu = false; vm.duplicate(session) },
+                            )
+                            DropdownMenuItem(text = { Text("Connect to another server") }, onClick = { addMenu = false; onBackToHosts() })
+                        }
+                    }
                     Box {
                         IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "More") }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -121,7 +142,8 @@ fun SessionScreen(session: SessionController, onBackToHosts: () -> Unit, onDisco
                     }
                 },
             )
-        },
+            if (vm.sessions.size > 1 && !imeVisible) SessionStrip(vm.sessions, session, onSelect = vm::open)
+        } },
         bottomBar = {
             // Hide tabs while typing so the terminal keeps as much room as possible.
             if (!imeVisible) NavigationBar {
@@ -203,6 +225,36 @@ fun SessionScreen(session: SessionController, onBackToHosts: () -> Unit, onDisco
             confirmButton = { TextButton(onClick = { q.answer.complete(true) }) { Text(if (changed) "Replace key" else "Trust") } },
             dismissButton = { TextButton(onClick = { q.answer.complete(false) }) { Text("Cancel") } },
         )
+    }
+}
+
+/** One tab per open session, so you can jump between servers (or several shells on one server). */
+@Composable
+private fun SessionStrip(sessions: List<SessionController>, current: SessionController, onSelect: (SessionController) -> Unit) {
+    ScrollableTabRow(selectedTabIndex = sessions.indexOf(current).coerceAtLeast(0), edgePadding = 8.dp) {
+        sessions.forEach { s ->
+            val st by s.state.collectAsState()
+            Tab(
+                selected = s == current,
+                onClick = { onSelect(s) },
+                text = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier.size(8.dp).background(
+                                when (st) {
+                                    ConnectionState.Connected -> MaterialTheme.colorScheme.primary
+                                    ConnectionState.Connecting, ConnectionState.Reconnecting -> MaterialTheme.colorScheme.tertiary
+                                    else -> MaterialTheme.colorScheme.error
+                                },
+                                CircleShape,
+                            )
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                },
+            )
+        }
     }
 }
 

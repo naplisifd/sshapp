@@ -18,10 +18,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
- * Foreground service that keeps the SSH connection alive while the app is in the background.
+ * Foreground service that keeps the SSH connections alive while the app is in the background.
  * Without it Android freezes or kills the process shortly after the user switches apps.
  */
 class SessionService : Service() {
@@ -48,36 +49,39 @@ class SessionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_DISCONNECT) {
-            SessionHolder.stop(this)
+            SessionHolder.stopAll(this)
             return START_NOT_STICKY
         }
-        val session = SessionHolder.session
-        if (session == null) {
+        val sessions = SessionHolder.sessions.toList()
+        if (sessions.isEmpty()) {
             stopSelf()
             return START_NOT_STICKY
         }
         ServiceCompat.startForeground(
-            this, NOTIFICATION_ID, buildNotification(session.host.label, session.state.value.label()),
+            this, NOTIFICATION_ID, buildNotification(sessions, sessions.map { it.state.value }),
             if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0,
         )
         watcher?.cancel()
         watcher = scope.launch {
-            snapshotFlow { SessionHolder.session }.collectLatest { s ->
-                if (s == null) { stopSelf(); return@collectLatest }
-                s.state.collect { st ->
+            snapshotFlow { SessionHolder.sessions.toList() }.collectLatest { list ->
+                if (list.isEmpty()) { stopSelf(); return@collectLatest }
+                combine(list.map { it.state }) { it.toList() }.collect { states ->
                     getSystemService(NotificationManager::class.java)
-                        .notify(NOTIFICATION_ID, buildNotification(s.host.label, st.label()))
+                        .notify(NOTIFICATION_ID, buildNotification(list, states))
                 }
             }
         }
         return START_NOT_STICKY
     }
 
-    private fun buildNotification(host: String, status: String) =
-        NotificationCompat.Builder(this, CHANNEL)
+    private fun buildNotification(sessions: List<SessionController>, states: List<ConnectionState>): android.app.Notification {
+        val lines = sessions.zip(states) { s, st -> "${s.title}: ${st.label()}" }
+        val single = sessions.size == 1
+        return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(host)
-            .setContentText(status)
+            .setContentTitle(if (single) sessions[0].title else "${sessions.size} SSH sessions")
+            .setContentText(if (single) states[0].label() else lines.joinToString(" · "))
+            .setStyle(if (single) null else NotificationCompat.InboxStyle().also { st -> lines.forEach(st::addLine) })
             .setOngoing(true)
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
@@ -90,7 +94,7 @@ class SessionService : Service() {
                 )
             )
             .addAction(
-                0, "Disconnect",
+                0, if (single) "Disconnect" else "Disconnect all",
                 PendingIntent.getService(
                     this, 1,
                     Intent(this, SessionService::class.java).setAction(ACTION_DISCONNECT),
@@ -98,6 +102,7 @@ class SessionService : Service() {
                 ),
             )
             .build()
+    }
 
     override fun onDestroy() {
         scope.cancel()

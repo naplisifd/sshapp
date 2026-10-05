@@ -16,8 +16,8 @@ data class HistoryEntry(val command: String, val count: Int, val lastUsed: Long)
     }
 }
 
-/** Per-host record of commands the user has run, used to rank suggestions. */
-class CommandHistory(context: Context, private val hostId: String) {
+/** Per-host record of commands the user has run, used to rank suggestions. Shared by all sessions to that host. */
+class CommandHistory private constructor(context: Context, private val hostId: String) {
     private val prefs = context.getSharedPreferences("history", Context.MODE_PRIVATE)
     private val _entries = MutableStateFlow(load())
     val entries: StateFlow<List<HistoryEntry>> = _entries.asStateFlow()
@@ -58,7 +58,13 @@ class CommandHistory(context: Context, private val hostId: String) {
         return _entries.value.sortedByDescending { it.score(now) }.take(limit)
     }
 
-    private companion object {
-        const val MAX_ENTRIES = 300
+    companion object {
+        private const val MAX_ENTRIES = 300
+        private val instances = HashMap<String, CommandHistory>()
+
+        /** One instance per host, so parallel sessions don't overwrite each other's saved history. */
+        fun forHost(context: Context, hostId: String): CommandHistory = synchronized(instances) {
+            instances.getOrPut(hostId) { CommandHistory(context.applicationContext, hostId) }
+        }
     }
 }

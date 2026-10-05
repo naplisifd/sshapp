@@ -11,6 +11,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import com.sshapp.ui.AppTheme
 import com.sshapp.ui.HostEditScreen
 import com.sshapp.ui.HostListScreen
@@ -31,16 +32,20 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             AppTheme {
+                val sessionStates = rememberSaveableStateHolder()
                 when (val s = vm.screen) {
                     Screen.HostList -> HostListScreen(vm)
                     is Screen.EditHost -> {
                         BackHandler { vm.screen = Screen.HostList }
                         HostEditScreen(vm, s.hostId)
                     }
-                    Screen.Session -> {
-                        val session = SessionHolder.session
-                        if (session == null) LaunchedEffect(Unit) { vm.screen = Screen.HostList }
-                        else SessionScreen(session, onBackToHosts = { vm.screen = Screen.HostList }, onDisconnect = vm::disconnect)
+                    is Screen.Session -> {
+                        val session = SessionHolder.find(s.sessionId)
+                        if (session == null) LaunchedEffect(s.sessionId) {
+                            vm.screen = SessionHolder.sessions.lastOrNull()?.let { Screen.Session(it.id) } ?: Screen.HostList
+                        }
+                        // Each session keeps its own tab, font size and input state while you switch between them.
+                        else sessionStates.SaveableStateProvider(session.id) { SessionScreen(vm, session) }
                     }
                 }
             }
